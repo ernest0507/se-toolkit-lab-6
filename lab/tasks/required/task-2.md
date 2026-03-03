@@ -32,9 +32,10 @@ The back-end contains intentional bugs that you will discover and fix by writing
     - [1.4.1. Create the environment file for end-to-end tests](#141-create-the-environment-file-for-end-to-end-tests)
     - [1.4.2. Run existing end-to-end tests](#142-run-existing-end-to-end-tests)
     - [1.4.3. Add three end-to-end tests](#143-add-three-end-to-end-tests)
-    - [1.4.4. Fix the bug](#144-fix-the-bug)
-    - [1.4.5. Redeploy and rerun](#145-redeploy-and-rerun)
-    - [1.4.6. Commit the fix](#146-commit-the-fix)
+    - [1.4.4. Diagnose the bug](#144-diagnose-the-bug)
+    - [1.4.5. Fix the bug](#145-fix-the-bug)
+    - [1.4.6. Redeploy and rerun](#146-redeploy-and-rerun)
+    - [1.4.7. Commit the fix](#147-commit-the-fix)
   - [1.5. Part C: Generate tests with an AI agent](#15-part-c-generate-tests-with-an-ai-agent)
     - [1.5.1. Generate tests](#151-generate-tests)
     - [1.5.2. Review and curate the tests](#152-review-and-curate-the-tests)
@@ -106,6 +107,7 @@ Title: `[Task] Back-end Testing`
 
 1. [Open the file](../../../wiki/vs-code.md#open-the-file):
    [`backend/tests/unit/test_interactions.py`](../../../backend/tests/unit/test_interactions.py).
+
 2. Add a new unit test that targets the following [boundary-value case](../../../wiki/testing.md#boundary-value-analysis):
 
    An interaction whose `item_id` is exactly equal to `max_item_id` — for example, `item_id=2` and `max_item_id=2`. This interaction should appear in the results because the filter condition is "less than or equal to."
@@ -270,9 +272,10 @@ Title: `[Task] Back-end Testing`
 - [1.4.1. Create the environment file for end-to-end tests](#141-create-the-environment-file-for-end-to-end-tests)
 - [1.4.2. Run existing end-to-end tests](#142-run-existing-end-to-end-tests)
 - [1.4.3. Add three end-to-end tests](#143-add-three-end-to-end-tests)
-- [1.4.4. Fix the bug](#144-fix-the-bug)
-- [1.4.5. Redeploy and rerun](#145-redeploy-and-rerun)
-- [1.4.6. Commit the fix](#146-commit-the-fix)
+- [1.4.4. Diagnose the bug](#144-diagnose-the-bug)
+- [1.4.5. Fix the bug](#145-fix-the-bug)
+- [1.4.6. Redeploy and rerun](#146-redeploy-and-rerun)
+- [1.4.7. Commit the fix](#147-commit-the-fix)
 
 > [!NOTE]
 > [End-to-end (E2E) tests](../../../wiki/testing.md#end-to-end-test) run on your local machine and send real [`HTTP` requests](../../../wiki/http.md#http-request) to the deployed version on the VM.
@@ -290,6 +293,7 @@ Title: `[Task] Back-end Testing`
    ```
 
 2. [Open](../../../wiki/vs-code.md#open-the-file) `.env.tests.e2e.secret`.
+
 3. Set [`API_BASE_URL`](../../../wiki/dotenv-tests-e2e-secret.md#api_base_url) to `http://<your-vm-ip-address>:<caddy-port>`. Replace:
 
    - [`<your-vm-ip-address>`](../../../wiki/vm.md#your-vm-ip-address)
@@ -319,6 +323,7 @@ Title: `[Task] Back-end Testing`
 
 1. [Open the file](../../../wiki/vs-code.md#open-the-file):
    [`backend/tests/e2e/test_interactions.py`](../../../backend/tests/e2e/test_interactions.py).
+
 2. Add three end-to-end tests that cover the following cases:
 
    - Test 1: `GET /interactions/` returns [`HTTP` status code](../../../wiki/http.md#http-response-status-code) `200`.
@@ -375,25 +380,77 @@ Title: `[Task] Back-end Testing`
 
    The `500` status code means the server encountered an internal error while building the response.
 
-#### 1.4.4. Fix the bug
+#### 1.4.4. Diagnose the bug
 
-1. [Open the file](../../../wiki/vs-code.md#open-the-file):
-   [`backend/app/models/interaction.py`](../../../backend/app/models/interaction.py).
-2. Fix the bug in `InteractionModel`.
+1. Switch to the `VS Code Terminal` connected to your VM (the one you used in [section 1.3.8](#138-deploy-the-fixed-app-service-on-your-vm)).
 
-3. <details><summary>Click to open a hint</summary>
+2. To read the recent `app` service logs,
 
-   The response model has a field whose name does not match the corresponding column in the database.
-   When `FastAPI` tries to serialize the database row into the response model, it cannot find the expected field and returns a `500` error.
+   [run in the `VS Code Terminal`](../../../wiki/vs-code.md#run-a-command-in-the-vs-code-terminal):
 
-   </details>
+   ```terminal
+   docker compose --env-file .env.docker.secret logs app --tail 30
+   ```
 
-4. <details><summary>Click to open the solution</summary>
+3. Look for a traceback near the bottom of the output.
+
+   The output should include lines similar to this:
+
+   ```terminal
+   app-1  | fastapi.exceptions.ResponseValidationError: 12 validation errors:
+   app-1  |   {'type': 'missing', 'loc': ('response', 0, 'timestamp'), 'msg': 'Field required', 'input': InteractionLog(kind='view', id=1, learner_id=1, item_id=1, created_at=datetime.datetime(2025, 9, 2, 10, 0))}
+   ...
+   app-1  |   {'type': 'missing', 'loc': ('response', 11, 'timestamp'), 'msg': 'Field required', 'input': InteractionLog(kind='view', id=12, learner_id=5, item_id=6, created_at=datetime.datetime(2025, 10, 16, 9, 30))}
+   app-1  | 
+   app-1  |   File "/app/backend/app/routers/interactions.py", line 26, in get_interactions
+   ```
+
+   This tells you that something bad happened in [`backend/app/routers/interactions.py`](../../../backend/app/routers/interactions.py) at the line 26.
+
+   Namely, the `timestamp` field is missing but `InteractionLog` has only the `created_at` field.
+
+4. Look at the code on that line:
+
+   ```python
+   @router.get("/", response_model=list[InteractionModel])
+   ```
+
+5. Look at the code inside `get_interactions`.
+
+   First, `interactions` are read from the database.
+
+   ```python
+   interactions = await read_interactions(session)
+   ```
+
+   Then, they're filtered:
+
+   ```python
+   return filter_by_max_item_id(interactions, max_item_id)
+   ```
+
+   The type of the returned value is `list[InteractionLog]`.
+
+   Look at the definition of `InteractionLog` in [`backend/app/models/interaction.py`](../../../backend/app/models/interaction.py).
+
+   It has the field `created_at`.
+
+   Now, look at the definition of `InteractionModel` below in the same file.
+
+   It has all the same fields as `InteractionLog` except it has `timestamp` instead of `created_at`.
+
+   So, `FastAPI` tries but can't convert `InteractionLog` to `InteractionModel` because of this field name mismatch.
+
+#### 1.4.5. Fix the bug
+
+1. Based on the traceback, fix the bug in `InteractionModel`.
+
+2. <details><summary>Click to open the solution</summary>
 
    Find this line in `InteractionModel`:
 
    ```python
-   timestamp: datetime  # BUG: should be 'created_at' to match the database column
+   timestamp: datetime
    ```
 
    Change it to:
@@ -404,7 +461,7 @@ Title: `[Task] Back-end Testing`
 
    </details>
 
-#### 1.4.5. Redeploy and rerun
+#### 1.4.6. Redeploy and rerun
 
 1. [Transfer the changes to your VM](#137-transfer-the-changes-to-your-vm)
 
@@ -426,7 +483,7 @@ Title: `[Task] Back-end Testing`
    ===================== 5 passed in X.XXs =====================
    ```
 
-#### 1.4.6. Commit the fix
+#### 1.4.7. Commit the fix
 
 1. [Commit](../../../wiki/git-workflow.md#commit) your changes.
 
