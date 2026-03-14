@@ -16,9 +16,10 @@ This model provides strong coding and reasoning capabilities suitable for an age
 ### Configuration
 
 The agent will be configured via environment variables (`.env.agent.secret`):
-- `LLM_API_KEY` - my-secret-api-key
-- `LLM_API_BASE` - Base URL of the LLM endpoint
-- `LLM_MODEL` - Model name to use
+- `LLM_API_KEY` - secret-api
+- `LLM_API_BASE` - http://10.93.24.243:42005/v1
+- `LLM_MODEL` - qwen3-coder-plus
+
 
 ## Agent Structure
 
