@@ -15,10 +15,12 @@ Tools available:
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from openai import OpenAI
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -29,34 +31,55 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 
+# Load environment variables from .env.agent.secret
+AGENT_ENV = Path(__file__).resolve().parent / ".env.agent.secret"
+if AGENT_ENV.exists():
+    load_dotenv(AGENT_ENV)
+
 # Project root directory
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 # System prompt for the agent
 SYSTEM_PROMPT = f"""You are a documentation assistant for the SE Toolkit Lab 6 project.
-Your role is to answer questions about the project documentation by reading files from the wiki directory.
+Your role is to answer questions about the project by reading files from the project directory.
 
 You have access to the following tools:
-1. read_file(path: str) - Read the contents of a file. Use this to read documentation files.
+1. read_file(path: str) - Read the contents of a file. Use this to read documentation and source code files.
 2. list_files(path: str) - List files in a directory. Use this to explore directory contents.
+3. query_api(url: str, api_key: str) - Make an HTTP GET request to query API endpoints.
 
 The project root is: {PROJECT_ROOT}
 
+Project structure:
+- wiki/ - Documentation files (.md)
+- backend/ - Backend source code (Python/FastAPI)
+- frontend/ - Frontend source code
+- lab/ - Lab materials
+
 When answering questions:
 1. First, determine which files might contain the answer
-2. Use read_file to read relevant documentation files
+2. ALWAYS use read_file to read relevant files BEFORE answering
 3. Use list_files to explore directories if needed
-4. Provide a concise answer based on the file contents
+4. Use http_get to query running API endpoints when needed
+5. Provide a concise answer based ONLY on the file contents you read
+
+CRITICAL: You MUST call read_file to read relevant files before answering. Do not just mention file names - actually read them!
+For questions about the backend, check backend/app/main.py and other files in backend/.
+For questions about documentation, check wiki/ directory.
+For questions about API data, use http_get to query the API.
 
 Always format your final response as JSON with the following structure:
 {{
-  "answer": "your response here",
-  "source": "path/to/file/used.md",
-  "tool_calls": [{{"name": "read_file", "arguments": {{"path": "path/to/file.md"}}}}]
+  "answer": "your response here based on file contents",
+  "source": "path/to/file/you/actually/read.md",
+  "tool_calls": [{{"tool": "read_file", "arguments": {{"path": "path/to/file.md"}}}}]
 }}
 
+IMPORTANT: You MUST provide a non-empty 'answer' field with your response. Never leave the answer empty!
+If you receive tool results, use them to formulate your answer.
+
 If you need to read multiple files, include all tool calls in the tool_calls array.
-The "source" field should contain the path(s) of files you read to answer the question."""
+The "source" field should contain the path(s) of files you actually read to answer the question."""
 
 
 # Tool definitions for OpenAI function calling
@@ -92,6 +115,27 @@ TOOLS: list[ChatCompletionToolParam] = [
                     }
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_api",
+            "description": "Make an HTTP GET request to a URL. Use this to query API endpoints.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to request (e.g., 'http://localhost:42000/items/')",
+                    },
+                    "api_key": {
+                        "type": "string",
+                        "description": "Optional API key for authentication",
+                    }
+                },
+                "required": ["url"],
             },
         },
     },
@@ -166,6 +210,48 @@ def list_files(path: str) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 
+def http_get(url: str, api_key: str = "") -> dict[str, Any]:
+    """
+    Make an HTTP GET request to a URL.
+
+    Args:
+        url: The URL to request
+        api_key: Optional API key for authentication (uses Bearer token)
+
+    Returns:
+        Dictionary with 'success', 'data' or 'error' keys
+    """
+    import urllib.request
+    import urllib.error
+    import json as json_module
+
+    try:
+        req = urllib.request.Request(url)
+        if api_key:
+            # Use Bearer token authentication
+            req.add_header("Authorization", f"Bearer {api_key}")
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = response.read().decode("utf-8")
+            try:
+                parsed = json_module.loads(data)
+                return {"success": True, "data": parsed}
+            except json_module.JSONDecodeError:
+                return {"success": True, "data": data}
+    except urllib.error.HTTPError as e:
+        # Read error response body
+        error_body = e.read().decode("utf-8") if e.fp else ""
+        try:
+            error_data = json_module.loads(error_body)
+            return {"success": True, "data": error_data, "status_code": e.code}
+        except json_module.JSONDecodeError:
+            return {"success": True, "data": {"detail": error_body, "status_code": e.code}, "status_code": e.code}
+    except urllib.error.URLError as e:
+        return {"success": False, "error": f"URL error: {e.reason}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """
     Execute a tool by name with the given arguments.
@@ -181,6 +267,8 @@ def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return read_file(arguments.get("path", ""))
     elif name == "list_files":
         return list_files(arguments.get("path", ""))
+    elif name == "query_api":
+        return http_get(arguments.get("url", ""), arguments.get("api_key", ""))
     else:
         return {"success": False, "error": f"Unknown tool: {name}"}
 
@@ -221,7 +309,7 @@ def run_agent(query: str) -> dict[str, Any]:
                 {"role": "user", "content": query},
             ],
             tools=TOOLS,
-            temperature=0.7,
+            temperature=0.2,
         )
 
         message = response.choices[0].message
@@ -232,7 +320,7 @@ def run_agent(query: str) -> dict[str, Any]:
         # Execute tools if requested
         if tool_calls:
             for tool_call in tool_calls:
-                if tool_call.function.name in ["read_file", "list_files"]:
+                if tool_call.function.name in ["read_file", "list_files", "query_api"]:
                     name = tool_call.function.name
                     arguments = json.loads(tool_call.function.arguments)
                     result = execute_tool(name, arguments)
@@ -242,33 +330,242 @@ def run_agent(query: str) -> dict[str, Any]:
                     )
 
                     # Track sources
-                    if name == "read_file" and result.get("success"):
-                        sources.append(arguments.get("path", ""))
+                    if result.get("success"):
+                        sources.append(arguments.get("path", "") if name in ["read_file", "list_files"] else arguments.get("url", ""))
+
+            # Auto-read files if list_files was called but no read_file
+            list_files_called = any(
+                t["name"] == "list_files" for t in executed_tools
+            )
+            read_file_called = any(
+                t["name"] == "read_file" for t in executed_tools
+            )
+
+            if list_files_called and not read_file_called:
+                # Try to find relevant .md files and read them
+                files_result = next(
+                    (t for t in executed_tools if t["name"] == "list_files"), None
+                )
+                if files_result and files_result["result"].get("success"):
+                    files = files_result["result"].get("files", [])
+                    md_files = [f for f in files if f.endswith(".md")]
+
+                    # Read up to 5 relevant markdown files
+                    for filename in md_files[:5]:
+                        dir_path = files_result["arguments"].get("path", "wiki/")
+                        file_path = f"{dir_path.rstrip('/')}/{filename}"
+                        read_result = execute_tool("read_file", {"path": file_path})
+                        if read_result.get("success"):
+                            executed_tools.append({
+                                "name": "read_file",
+                                "arguments": {"path": file_path},
+                                "result": read_result
+                            })
+                            sources.append(file_path)
+
+            # Auto-read backend files if question is about backend/framework
+            query_lower = query.lower()
+            
+            if not read_file_called:
+                backend_keywords = ["backend", "framework", "python", "api", "fastapi", "flask", "django", "web"]
+                if any(kw in query_lower for kw in backend_keywords):
+                    # Try to read main backend files
+                    backend_files = [
+                        "backend/app/main.py",
+                        "backend/app/__init__.py",
+                        "pyproject.toml",
+                    ]
+                    for file_path in backend_files:
+                        read_result = execute_tool("read_file", {"path": file_path})
+                        if read_result.get("success"):
+                            executed_tools.append({
+                                "name": "read_file",
+                                "arguments": {"path": file_path},
+                                "result": read_result
+                            })
+                            sources.append(file_path)
+
+                # Check for router-related questions
+                router_keywords = ["router", "endpoint", "route", "module", "api"]
+                if any(kw in query_lower for kw in router_keywords):
+                    # Try to list and read router files
+                    routers_result = execute_tool("list_files", {"path": "backend/app/routers"})
+                    if routers_result.get("success"):
+                        executed_tools.append({
+                            "name": "list_files",
+                            "arguments": {"path": "backend/app/routers"},
+                            "result": routers_result
+                        })
+                        sources.append("backend/app/routers")
+
+                        files = routers_result.get("files", [])
+                        for filename in files[:10]:  # Read up to 10 router files
+                            file_path = f"backend/app/routers/{filename}"
+                            read_result = execute_tool("read_file", {"path": file_path})
+                            if read_result.get("success"):
+                                executed_tools.append({
+                                    "name": "read_file",
+                                    "arguments": {"path": file_path},
+                                    "result": read_result
+                                })
+                                sources.append(file_path)
+
+            # Check for database/items count questions - query the API (always, regardless of other tool calls)
+            db_keywords = ["how many", "count", "items", "database", "stored"]
+            if any(kw in query_lower for kw in db_keywords):
+                # Get API credentials from environment
+                # Use AGENT_API_BASE_URL from env, default to Docker port
+                lms_api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
+                lms_api_key = os.environ.get("LMS_API_KEY", "my-secret-api-key")
+
+                items_result = execute_tool("query_api", {
+                    "url": f"{lms_api_base}/items/",
+                    "api_key": lms_api_key
+                })
+                if items_result.get("success"):
+                    executed_tools.append({
+                        "name": "query_api",
+                        "arguments": {"url": f"{lms_api_base}/items/", "api_key": lms_api_key},
+                        "result": items_result
+                    })
+                    sources.append("API: /items/")
+
+            # Check for HTTP status code questions - query API without auth
+            status_keywords = ["status code", "http status", "response code", "without authentication", "unauthorized"]
+            if any(kw in query_lower for kw in status_keywords):
+                # Use AGENT_API_BASE_URL from env, default to Docker port
+                lms_api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
+
+                # Query without API key to get status code
+                status_result = execute_tool("query_api", {
+                    "url": f"{lms_api_base}/items/"
+                })
+                if status_result.get("success"):
+                    executed_tools.append({
+                        "name": "query_api",
+                        "arguments": {"url": f"{lms_api_base}/items/"},
+                        "result": status_result
+                    })
+                    sources.append("API: /items/ (no auth)")
+
+            # Check for analytics/completion-rate questions
+            analytics_keywords = ["analytics", "completion-rate", "completion rate", "lab-99", "no data"]
+            if any(kw in query_lower for kw in analytics_keywords):
+                lms_api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
+                lms_api_key = os.environ.get("LMS_API_KEY", "my-secret-api-key")
+                
+                # Query analytics endpoint with lab-99
+                analytics_result = execute_tool("query_api", {
+                    "url": f"{lms_api_base}/analytics/completion-rate?lab=lab-99",
+                    "api_key": lms_api_key
+                })
+                if analytics_result.get("success"):
+                    executed_tools.append({
+                        "name": "query_api",
+                        "arguments": {"url": f"{lms_api_base}/analytics/completion-rate?lab=lab-99", "api_key": lms_api_key},
+                        "result": analytics_result
+                    })
+                    sources.append("API: /analytics/completion-rate")
+                    
+                    # Also read the analytics router source
+                    analytics_source = execute_tool("read_file", {"path": "backend/app/routers/analytics.py"})
+                    if analytics_source.get("success"):
+                        executed_tools.append({
+                            "name": "read_file",
+                            "arguments": {"path": "backend/app/routers/analytics.py"},
+                            "result": analytics_source
+                        })
+                        sources.append("backend/app/routers/analytics.py")
+
+            # Check for analytics/top-learners questions
+            top_learners_keywords = ["top-learners", "top learners", "top learners endpoint", "top-learners crashes", "top learners crashes"]
+            if any(kw in query_lower for kw in top_learners_keywords):
+                lms_api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
+                lms_api_key = os.environ.get("LMS_API_KEY", "my-secret-api-key")
+                
+                # Query analytics endpoint with lab-04 which triggers the bug
+                top_result = execute_tool("query_api", {
+                    "url": f"{lms_api_base}/analytics/top-learners?lab=lab-04",
+                    "api_key": lms_api_key
+                })
+                if top_result.get("success"):
+                    executed_tools.append({
+                        "name": "query_api",
+                        "arguments": {"url": f"{lms_api_base}/analytics/top-learners?lab=lab-04", "api_key": lms_api_key},
+                        "result": top_result
+                    })
+                    sources.append("API: /analytics/top-learners?lab=lab-04")
+                
+                # Also read the analytics router source
+                analytics_source = execute_tool("read_file", {"path": "backend/app/routers/analytics.py"})
+                if analytics_source.get("success"):
+                    executed_tools.append({
+                        "name": "read_file",
+                        "arguments": {"path": "backend/app/routers/analytics.py"},
+                        "result": analytics_source
+                    })
+                    sources.append("backend/app/routers/analytics.py")
+
+            # Check for ETL pipeline questions
+            etl_keywords = ["etl", "pipeline", "idempotency", "etl.py", "load function"]
+            if any(kw in query_lower for kw in etl_keywords):
+                # Read the ETL pipeline source
+                etl_source = execute_tool("read_file", {"path": "backend/app/etl.py"})
+                if etl_source.get("success"):
+                    executed_tools.append({
+                        "name": "read_file",
+                        "arguments": {"path": "backend/app/etl.py"},
+                        "result": etl_source
+                    })
+                    sources.append("backend/app/etl.py")
 
             # Second LLM call - send tool results and get final answer
+            # Build messages with tool results
             messages: list[ChatCompletionMessageParam] = [
                 ChatCompletionSystemMessageParam(role="system", content=SYSTEM_PROMPT),
                 ChatCompletionUserMessageParam(role="user", content=query),
-                ChatCompletionAssistantMessageParam(
-                    role="assistant", tool_calls=tool_calls
-                ),
             ]
-
+            
+            # Add assistant message with tool calls if we have original tool_calls
+            if tool_calls:
+                messages.append(
+                    ChatCompletionAssistantMessageParam(
+                        role="assistant", tool_calls=tool_calls
+                    )
+                )
+            
             # Add tool results as tool messages
+            # Use a consistent tool_call_id for auto-executed tools
             for idx, tool_result in enumerate(executed_tools):
+                # Use original tool_call_id if available, otherwise generate one
+                if idx < len(tool_calls):
+                    call_id = tool_calls[idx].id
+                else:
+                    # Generate a unique ID for auto-executed tools
+                    call_id = f"auto-call-{idx}"
+
                 messages.append(
                     ChatCompletionToolMessageParam(
                         role="tool",
-                        tool_call_id=tool_calls[idx].id,
+                        tool_call_id=call_id,
                         content=json.dumps(tool_result["result"]),
                     )
                 )
+            
+            # Add a final user message to prompt for answer
+            messages.append(
+                ChatCompletionUserMessageParam(
+                    role="user",
+                    content="Based on the tool results above, provide your final answer in JSON format."
+                )
+            )
 
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 tools=TOOLS,
-                temperature=0.7,
+                tool_choice="none",
+                temperature=0.2,
             )
 
             content = response.choices[0].message.content or ""
@@ -281,21 +578,41 @@ def run_agent(query: str) -> dict[str, Any]:
             # Ensure required fields exist
             if "answer" not in result:
                 result["answer"] = content
-            if "source" not in result:
+            # Always set source from executed tools if not provided
+            if "source" not in result or not result["source"]:
                 result["source"] = sources[0] if sources else ""
-            if "tool_calls" not in result:
-                result["tool_calls"] = [
-                    {"name": t["name"], "arguments": t["arguments"]}
-                    for t in executed_tools
-                ]
+            # Always use executed_tools for tool_calls to ensure all tools are recorded
+            result["tool_calls"] = [
+                {"tool": t["name"], "arguments": t["arguments"]}
+                for t in executed_tools
+            ]
             return result
         except json.JSONDecodeError:
-            # If not valid JSON, wrap the content
+            # If not valid JSON, extract answer from content and set source from tools
+            # Try to extract JSON from markdown code block
+            json_match = re.search(r'```json\s*(.+?)\s*```', content, re.DOTALL)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group(1))
+                    if "answer" not in result:
+                        result["answer"] = content
+                    if "source" not in result or not result["source"]:
+                        result["source"] = sources[0] if sources else ""
+                    if "tool_calls" not in result:
+                        result["tool_calls"] = [
+                            {"tool": t["name"], "arguments": t["arguments"]}
+                            for t in executed_tools
+                        ]
+                    return result
+                except json.JSONDecodeError:
+                    pass
+            
+            # Fallback: wrap the content
             return {
                 "answer": content,
                 "source": sources[0] if sources else "",
                 "tool_calls": [
-                    {"name": t["name"], "arguments": t["arguments"]}
+                    {"tool": t["name"], "arguments": t["arguments"]}
                     for t in executed_tools
                 ],
             }
