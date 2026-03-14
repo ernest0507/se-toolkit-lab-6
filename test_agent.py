@@ -1,4 +1,4 @@
-"""Regression tests for agent.py."""
+"""Regression tests for agent.py - Task 1."""
 
 import json
 import subprocess
@@ -8,7 +8,7 @@ from pathlib import Path
 
 def test_agent_output_contains_answer_and_tool_calls() -> None:
     """
-    Test that agent.py outputs valid JSON with 'answer' and 'tool_calls' fields.
+    Test that agent.py outputs valid JSON with 'answer', 'source', and 'tool_calls' fields.
 
     This test runs agent.py as a subprocess with a sample query,
     parses the stdout JSON, and verifies the required fields are present.
@@ -30,5 +30,6 @@ def test_agent_output_contains_answer_and_tool_calls() -> None:
 
     # Verify required fields are present
     assert "answer" in output, "Output must contain 'answer' field"
+    assert "source" in output, "Output must contain 'source' field"
     assert "tool_calls" in output, "Output must contain 'tool_calls' field"
     assert isinstance(output["tool_calls"], list), "'tool_calls' must be a list"
