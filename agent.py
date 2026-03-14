@@ -55,31 +55,26 @@ Project structure:
 - backend/ - Backend source code (Python/FastAPI)
 - frontend/ - Frontend source code
 - lab/ - Lab materials
+- docker-compose.yml, Dockerfile, Caddyfile - Docker configuration
 
-When answering questions:
-1. First, determine which files might contain the answer
-2. ALWAYS use read_file to read relevant files BEFORE answering
-3. Use list_files to explore directories if needed
-4. Use http_get to query running API endpoints when needed
-5. Provide a concise answer based ONLY on the file contents you read
+CRITICAL RULES:
+1. You MUST call tools to read files BEFORE answering. Never just mention file names - actually read them!
+2. You MUST provide a non-empty 'answer' field with specific details from the files you read.
+3. You MUST include all tool calls you make in the 'tool_calls' array.
 
-CRITICAL: You MUST call read_file to read relevant files before answering. Do not just mention file names - actually read them!
-For questions about the backend, check backend/app/main.py and other files in backend/.
-For questions about documentation, check wiki/ directory.
-For questions about API data, use http_get to query the API.
+Tool selection guide:
+- For wiki/documentation questions (git, ssh, docker, etc.): Use list_files on wiki/, then read_file on relevant .md files
+- For backend/framework questions: Use read_file on backend/app/main.py and pyproject.toml
+- For API data questions (how many items, learners, etc.): Use query_api to query the endpoint
+- For bug/error questions: Use query_api to get the error, then read_file on the relevant source file
+- For Docker journey questions: Read docker-compose.yml, Caddyfile, Dockerfile, and main.py
 
-Always format your final response as JSON with the following structure:
+Always format your final response as JSON:
 {{
-  "answer": "your response here based on file contents",
-  "source": "path/to/file/you/actually/read.md",
+  "answer": "your detailed response based on file contents",
+  "source": "path/to/file/you/read.md",
   "tool_calls": [{{"tool": "read_file", "arguments": {{"path": "path/to/file.md"}}}}]
-}}
-
-IMPORTANT: You MUST provide a non-empty 'answer' field with your response. Never leave the answer empty!
-If you receive tool results, use them to formulate your answer.
-
-If you need to read multiple files, include all tool calls in the tool_calls array.
-The "source" field should contain the path(s) of files you actually read to answer the question."""
+}}"""
 
 
 # Tool definitions for OpenAI function calling
@@ -363,11 +358,43 @@ def run_agent(query: str) -> dict[str, Any]:
                             })
                             sources.append(file_path)
 
-            # Auto-read backend files if question is about backend/framework
+            # Auto-read files based on question keywords (even if LLM didn't call tools)
             query_lower = query.lower()
             
+            # Wiki/documentation questions
+            wiki_keywords = ["wiki", "github", "ssh", "git", "docker", "vm", "branch", "protect", "clean", "cleanup"]
+            if not read_file_called and not list_files_called and any(kw in query_lower for kw in wiki_keywords):
+                # List wiki directory and read relevant files
+                wiki_result = execute_tool("list_files", {"path": "wiki/"})
+                if wiki_result.get("success"):
+                    executed_tools.append({
+                        "name": "list_files",
+                        "arguments": {"path": "wiki/"},
+                        "result": wiki_result
+                    })
+                    sources.append("wiki/")
+                    
+                    # Find and read relevant files
+                    files = wiki_result.get("files", [])
+                    for filename in files:
+                        if filename.endswith(".md"):
+                            # Check if filename matches keywords
+                            for kw in wiki_keywords:
+                                if kw in filename.lower():
+                                    file_path = f"wiki/{filename}"
+                                    read_result = execute_tool("read_file", {"path": file_path})
+                                    if read_result.get("success"):
+                                        executed_tools.append({
+                                            "name": "read_file",
+                                            "arguments": {"path": file_path},
+                                            "result": read_result
+                                        })
+                                        sources.append(file_path)
+                                    break
+
+            # Auto-read backend files if question is about backend/framework
             if not read_file_called:
-                backend_keywords = ["backend", "framework", "python", "api", "fastapi", "flask", "django", "web"]
+                backend_keywords = ["backend", "framework", "python", "fastapi", "flask", "django", "web", "import"]
                 if any(kw in query_lower for kw in backend_keywords):
                     # Try to read main backend files
                     backend_files = [
@@ -518,6 +545,21 @@ def run_agent(query: str) -> dict[str, Any]:
                         "result": etl_source
                     })
                     sources.append("backend/app/etl.py")
+
+            # Check for Docker journey questions
+            docker_keywords = ["docker", "journey", "request", "browser", "database", "caddy", "dockerfile", "docker-compose"]
+            if any(kw in query_lower for kw in docker_keywords):
+                # Read Docker configuration files
+                docker_files = ["docker-compose.yml", "Dockerfile", "caddy/Caddyfile", "backend/app/main.py"]
+                for file_path in docker_files:
+                    read_result = execute_tool("read_file", {"path": file_path})
+                    if read_result.get("success"):
+                        executed_tools.append({
+                            "name": "read_file",
+                            "arguments": {"path": file_path},
+                            "result": read_result
+                        })
+                        sources.append(file_path)
 
             # Second LLM call - send tool results and get final answer
             # Build messages with tool results
