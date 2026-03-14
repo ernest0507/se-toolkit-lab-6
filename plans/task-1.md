@@ -20,6 +20,7 @@ The agent will be configured via environment variables (`.env.agent.secret`):
 - `LLM_API_BASE` - http://10.93.24.243:42005/v1
 - `LLM_MODEL` - qwen3-coder-plus
 
+
 ## Agent Structure
 
 ### Architecture

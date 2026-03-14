@@ -18,6 +18,7 @@ Configure the agent by creating a `.env.agent.secret` file (copy from `.env.agen
 # Your LLM provider API key
 LLM_API_KEY=secret-api
 
+
 # API base URL (OpenAI-compatible endpoint)
 LLM_API_BASE=http://10.93.24.243:42005/v1
 
